@@ -39,7 +39,6 @@ Replibyte supports multiple databases.
 
 - [PostgreSQL](/docs/databases#postgresql)
 - [MySQL](/docs/databases#mysql)
-- [MongoDB](/docs/databases#mongodb)
 
 ## Transformer
 
@@ -56,6 +55,7 @@ Here is a list of all the [transformers available](/docs/transformers).
 | email           | Replace the string value by an email address                                                       | [link](/docs/transformers#email)                |
 | keep-first-char | Keep only the first char for strings and digit for numbers                                         | [link](/docs/transformers#keep-first-character) |
 | phone-number    | Replace the string value by a phone number                                                         | [link](/docs/transformers#phone-number)         |
+| mobile-number   | Replace the string value by a mobile number                                                        | [link](/docs/transformers#mobile-number)        |
 | credit-card     | Replace the string value by a credit card number                                                   | [link](/docs/transformers#credit-card)          |
 | redacted        | Obfuscate your sensitive data (>3 characters strings only). [4242 4242 4242 4242]->[424**********] | [link](/docs/transformers#redacted)             |
 

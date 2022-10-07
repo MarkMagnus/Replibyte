@@ -130,7 +130,7 @@ mod tests {
         };
 
         let options = ContainerOptions {
-            host_port: 5433,
+            host_port: 5455,
             container_port: 5432,
         };
 

@@ -7,7 +7,7 @@ sidebar_position: 3
 
 :::caution
 
-Only PostgreSQL supports *Subsetting* at the moment. Feel free to [contribute](/docs/contributing) to accelerate the support of MySQL and MongoDB 
+Only PostgreSQL supports *Subsetting* at the moment. Feel free to [contribute](/docs/contributing) to accelerate the support of MySQL 
 
 :::
 

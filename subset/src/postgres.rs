@@ -1,5 +1,4 @@
 use crate::dedup::does_line_exist_and_set;
-use crate::postgres::SubsetStrategy::RandomPercent;
 use crate::{
     utils, PassthroughTable, Progress, Subset, SubsetOptions, SubsetTable, SubsetTableRelation,
 };
@@ -14,6 +13,7 @@ use std::fs::File;
 use std::io::{BufReader, Error, ErrorKind, Read};
 use std::ops::Index;
 use std::path::Path;
+use crate::postgres::SubsetStrategy::RandomPercent;
 
 type Database = String;
 type Table = String;
@@ -301,7 +301,6 @@ fn get_insert_into_md5_hash(query: &str) -> String {
     let digest = md5::compute(key.as_bytes());
     format!("{:x}", digest)
 }
-
 fn list_percent_of_insert_into_rows<R: Read>(
     percent: u8,
     table_stats: &TableStats,

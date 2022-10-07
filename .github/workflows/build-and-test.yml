@@ -50,7 +50,7 @@ jobs:
       - name: Build RepliByte
         run: cargo build --release --all-features
 
-      - name: Start Postgres, MySQL, MongoDB and MinIO Containers
+      - name: Start Postgres, MySQL and MinIO Containers
         run: docker-compose -f "docker-compose-dev.yml" up -d --build
 
       - name: Test RepliByte

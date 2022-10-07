@@ -1,6 +1,6 @@
 use crate::DumpFileError;
 use crate::DumpFileError::ReadError;
-use std::fs::File;
+use std::fs::{File, read};
 use std::io::{BufRead, BufReader, Read};
 use std::str;
 
@@ -27,6 +27,40 @@ where
 
     let reader = BufReader::new(file);
     list_sql_queries_from_dump_reader(reader, query)
+}
+
+pub fn list_sql_copy_csv_from_dump_reader<R, F>(
+    mut dump_reader: BufReader<R>,
+    read_limit: i32,
+    mut csv_rows: F,
+) -> Result<(), DumpFileError>
+where
+    R: Read,
+    F: FnMut(&str) -> ListQueryResult,
+{
+    let mut row_count = 0;
+    let mut csv_rows_str = String::new();
+
+    for line in dump_reader.lines() {
+        match line {
+            Ok(line)  => {
+                csv_rows_str.push_str(&*line);
+                csv_rows_str.push_str("\n");
+
+                if row_count == read_limit {
+                    csv_rows(&*csv_rows_str);
+                }
+
+                row_count += 1;
+            },
+            Err(err) => {
+                csv_rows(&*csv_rows_str); // EOF
+                return Err(ReadError(err));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// read dump and callback query function with each valid query inside the dump

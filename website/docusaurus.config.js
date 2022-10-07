@@ -43,7 +43,7 @@ const config = {
   /** @type {import('@docusaurus/preset-classic').ThemeConfig} */
     ({
       metadata: [{
-        name: 'keywords', content: 'seed database, postgresql, postgres, mysql, mongodb, database, preview environment'
+        name: 'keywords', content: 'seed database, postgresql, postgres, mysql, database, preview environment'
       }],
       navbar: {
         title: 'Replibyte',

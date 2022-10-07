@@ -49,22 +49,6 @@ source:
 
 <details>
 
-<summary>MongoDB</summary>
-
-```yaml
-source:
-  connection_uri: mongodb://[user]:[password]@[host]:[port]/[database]
-```
-
-</details>
-
-or you can also use an environment variable
-
-```yaml title="With an environment variable"
-source:
-  connection_uri: $DATABASE_URL
-```
-
 ### Option 2: Make a dump manually
 
 Here are the commands to dump your database yourself
@@ -89,15 +73,6 @@ mysqldump -h [host] -P [port] -u [username] -p --add-drop-database --add-drop-ta
 
 </details>
 
-<details>
-
-<summary>MongoDB</summary>
-
-```yaml
-mongodump -h [host] --port [port] --authenticationDatabase [auth_db|default: admin] --db [database] -u [username] -p [password] --archive
-```
-
-</details>
 
 ### Option 3: You already have a dump
 
@@ -105,11 +80,6 @@ You have nothing to do, but it is possible that some options are missing from yo
 
 ## Hide sensitive data with Transformers
 
-:::note
-
-A MongoDB `Collection` can be associated to a SQL `table`, and a `Document` to a `table row`. 
-
-:::
 
 By using [Transformers](/docs/transformers), you can change on the fly your database data. Let's say we have the following structure for a table `employees`
 

@@ -4,7 +4,7 @@ use crate::connector::Connector;
 use crate::source::mysql::read_and_transform;
 use crate::types::{OriginalQuery, Query};
 use crate::Source;
-use crate::SourceOptions;
+use crate::source::source_options::SourceOptions;
 
 /// Source MySQL dump from STDIN
 pub struct MysqlStdin {}

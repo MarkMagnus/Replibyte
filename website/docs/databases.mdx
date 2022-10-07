@@ -4,7 +4,7 @@ sidebar_position: 5
 
 # Databases
 
-Replibyte supports [PostgreSQL](#postgresql), [MySQL](#mysql--mariadb) and [MongoDB](#mongodb) databases.
+Replibyte supports [PostgreSQL](#postgresql), [MySQL](#mysql--mariadb)
 
 ## PostgreSQL
 
@@ -41,28 +41,3 @@ source:
 destination:
   connection_uri: mysql://<user>:<password>@<host>:<port>/<database> # you can use $DATABASE_URL
 ```
-
-## MongoDB
-
-:::caution requirements
-
-You need `mongodump` binary locally installed for running `replibyte backup --remote` and `replibyte restore --remote`
-
-:::
-
-To use MongoDB it's as simple as using prefixed connection URI with `mongodb://`
-
-```yaml
-source:
-  connection_uri: mongodb://<user>:<password>@<host>:<port>/<database>?<options> # you can use $DATABASE_URL
-#...
-destination:
-  connection_uri: mongodb://<user>:<password>@<host>:<port>/<database>?<options> # you can use $DATABASE_URL
-```
-
-
-## Add another database
-
-If you don't find your database, Replibyte is extensible and any database can be supported. You are free to contribute by opening an issue or/and a pull request.
-
-To contribute, please see the [contributing](/docs/contributing) page.

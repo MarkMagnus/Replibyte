@@ -1,49 +1,26 @@
-use std::borrow::BorrowMut;
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io;
-use std::io::{BufReader, Error, ErrorKind, Read, Write};
+use std::collections::HashMap;
+use std::io::{BufReader, Error, ErrorKind, Read};
 use std::process::{Command, Stdio};
-
-use log::info;
-
-use dump_parser::postgres::Keyword::NoKeyword;
-use dump_parser::postgres::{
-    get_column_names_from_insert_into_query, get_column_values_from_insert_into_query,
-    get_tokens_from_query_str, get_word_value_at_position, match_keyword_at_position, Keyword,
-    Token,
-};
-use dump_parser::utils::{list_sql_queries_from_dump_reader, ListQueryResult};
-use subset::postgres::{PostgresSubset, SubsetStrategy};
-use subset::{PassthroughTable, Subset, SubsetOptions};
-
-use crate::config::DatabaseSubsetConfigStrategy;
+use sorted_vec::SortedVec;
+use dump_parser::utils::{list_sql_copy_csv_from_dump_reader, list_sql_queries_from_dump_reader, ListQueryResult};
+use crate::config::{DatabaseSubsetConfigStrategy, DbColumnConfig, DbTableConfig, SourceConfig};
 use crate::connector::Connector;
+use crate::DatabaseSubsetConfig;
+use crate::source::csv_sub_source::CsvSubSource;
 use crate::source::Source;
 use crate::transformer::Transformer;
-use crate::types::{Column, InsertIntoQuery, OriginalQuery, Query};
+use crate::types::{OriginalQuery, Query};
 use crate::utils::{binary_exists, wait_for_command};
-use crate::DatabaseSubsetConfig;
-
 use super::SourceOptions;
 
-enum RowType {
-    InsertInto {
-        database_name: String,
-        table_name: String,
-    },
-    CreateTable {
-        database_name: String,
-        table_name: String,
-    },
-    AlterTable {
-        database_name: String,
-        table_name: String,
-    },
-    Others,
-}
+use mockall_double::double;
+
+#[double]
+use postgres_schema::QueryStruct;
+use crate::source::postgres_schema::postgres_schema;
 
 pub struct Postgres<'a> {
+    pub(crate) connection_uri: &'a str,
     host: &'a str,
     port: u16,
     database: &'a str,
@@ -53,6 +30,7 @@ pub struct Postgres<'a> {
 
 impl<'a> Postgres<'a> {
     pub fn new(
+        connection_uri: &'a str,
         host: &'a str,
         port: u16,
         database: &'a str,
@@ -60,6 +38,7 @@ impl<'a> Postgres<'a> {
         password: &'a str,
     ) -> Self {
         Postgres {
+            connection_uri,
             host,
             port,
             database,
@@ -69,751 +48,524 @@ impl<'a> Postgres<'a> {
     }
 }
 
+/// require both pg_dump and psql to continue
+/// for data
+/// psql -Atx <connection string>  -c "\copy <query> to stdout with (delimiter E'\t', FORMAT csv, QUOTE E'T' );"
+/// for structure
+/// pg_dump -d <connection string> <options>
 impl<'a> Connector for Postgres<'a> {
     fn init(&mut self) -> Result<(), Error> {
-        binary_exists("pg_dump")
+        pg_dump_exists().and_then(|_n| pg_dump_exists())
     }
+}
+
+fn pg_dump_exists() -> Result<(), Error> {
+    binary_exists("pg_dump")
+}
+
+fn psql_exists() -> Result<(), Error> {
+    binary_exists("psql")
+}
+
+fn get_dump_args(options: &SourceOptions, postgres: &Postgres) -> Vec<String> {
+    let mut dump_args = vec![
+        "--no-owner",       // skip restoration of object ownership
+        "-d",
+        postgres.connection_uri,
+        "--schema-only",
+    ];
+
+    let only_tables_args: Vec<String> = options
+        .only_tables
+        .iter()
+        .map(|cfg| format!("--table={}.{}", cfg.database, cfg.table))
+        .collect();
+
+    let mut only_tables_args: Vec<&str> = only_tables_args
+        .iter()
+        .map(String::as_str)
+        .collect();
+
+    dump_args.append(&mut only_tables_args);
+    let a: Vec<String> = dump_args.into_iter().map(|s| s.to_string()).collect();
+    a
+}
+
+fn dump_database_schema<F: FnMut(OriginalQuery, Query)>(options: &SourceOptions, postgres: &Postgres, query_callback: &mut F) -> Result<(), Error> {
+    let dump_args = get_dump_args(options, postgres);
+    let mut process = Command::new("pg_dump")
+        .args(dump_args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdout = process
+        .stdout
+        .take()
+        .ok_or_else(|| Error::new(ErrorKind::Other, "Could not capture standard output."))?;
+
+    let reader = BufReader::new(stdout);
+    read_schema(reader, query_callback);
+
+    wait_for_command(&mut process)
+}
+
+///psql -Atx <connection string>  -c "\copy (<query>) to stdout with ( delimiter E'\t', FORMAT csv, QUOTE E'T' );"
+fn get_copy_args(subset_config: &DatabaseSubsetConfig, connection_uri: &str) -> Vec<String> {
+    let mut copy_args = vec![
+        "-Atx",
+        connection_uri,
+        "-c",
+    ];
+
+    let query: String = match &subset_config.strategy {
+        DatabaseSubsetConfigStrategy::None => {
+            let a = format!("select * from {}.{}",
+                            subset_config.database, subset_config.table);
+            a
+        }
+        DatabaseSubsetConfigStrategy::ForeignKey(fks) => {
+            let a = format!("select * from {}.{} where {}",
+                            subset_config.database, subset_config.table, fks.condition);
+            a
+        }
+        DatabaseSubsetConfigStrategy::Random(rs) => {
+            let a = format!("select * from {}.{} tablesample system({}) order by random()",
+                            subset_config.database, subset_config.table, rs.percent);
+            a
+        }
+    };
+    let command: String = format!("\\copy ({}) to stdout with (delimiter E'\\t', FORMAT csv, QUOTE E'T');", query);
+    copy_args.push(&command);
+    let a: Vec<String> = copy_args.into_iter().map(|s| s.to_string()).collect();
+    a
+}
+
+fn dump_database_data<F: FnMut(OriginalQuery, Query)>(options: &SourceOptions, postgres: &Postgres, query_callback: &mut F) -> Result<(), Error> {
+    let query_struct = QueryStruct::new(String::from(postgres.connection_uri));
+    for subset_config in database_tables_subset_config(options, &query_struct) {
+        match dump_table_data(subset_config, options, &query_struct, query_callback) {
+            Err(e) => return Err(e),
+            _ => {}
+        }
+    };
+    Ok(())
+}
+
+/*
+COPY public.contact(email, mobile_number, fields, cache, first_name, last_name) from stdin (delimiter E'\t', FORMAT csv, QUOTE E'T');
+joe.blogs@gmail.com	61466343749	{"1": "2", "3": "4", "a": "2", "email": "joe.blogs@gmail.com"}	"1"=>"2", "3"=>"4", "a"=>"2", "\"email\""=>"\"joe.blogs@gmail.com\""	mark	magnus
+\.
+*/
+
+fn generate_sql_copy_template(subset_config: &DatabaseSubsetConfig, columns: &SortedVec<DbColumnConfig>) -> String {
+    let ord_column_names: Vec<String> = columns.iter().map(|dbcc| dbcc.column.to_string()).collect();
+    let ord_column_names_str = ord_column_names.join(",");
+    let template = format!("\\COPY {}.{} ({}) FROM stdin (delimiter E'\t', FORMAT csv, QUOTE E'T');",
+                            subset_config.database, subset_config.table, ord_column_names_str);
+    template
+}
+
+fn dump_table_data<F: FnMut(OriginalQuery, Query)>(
+    subset_config: DatabaseSubsetConfig,
+    options: &SourceOptions,
+    query_struct: &QueryStruct,
+    query_callback: &mut F
+) -> Result<(), Error> {
+    let copy_args = get_copy_args(&subset_config, &query_struct.connection_uri());
+    let columns = query_struct.database_columns(subset_config.table_config());
+
+    let mut process = Command::new("psql")
+        .args(copy_args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdout = process
+        .stdout
+        .take()
+        .ok_or_else(|| Error::new(ErrorKind::Other, "Could not capture standard output."))?;
+
+    let reader = BufReader::new(stdout);
+    read_table_data(reader, options, subset_config, query_callback, columns);
+
+    wait_for_command(&mut process)
+}
+
+fn subset_tables(options: &SourceOptions) -> Vec<DbTableConfig> {
+    let tables: Vec<DbTableConfig> = match options.database_subset {
+        Some(subset) => {
+            let t: Vec<DbTableConfig> = subset
+                .iter()
+                .map(|config|
+                    DbTableConfig::new(config.database.to_string(), config.table.to_string())
+                ).collect();
+            t
+        }
+        None => Vec::new()
+    };
+    tables
+}
+
+fn database_tables_subset_config(options: &SourceOptions, query_struct: &QueryStruct) -> Vec<DatabaseSubsetConfig> {
+    let mut table_subset_config: Vec<DatabaseSubsetConfig> = vec![];
+    let subset_tables = subset_tables(options);
+    for table in query_struct.database_tables() {
+        // unless specified in subset or skipping that table then don't generate default subset config
+        // limit table config ignores skip tables configuration
+        let limit_table_config = options.only_tables.len() > 1;
+        if limit_table_config {
+            if !subset_tables.contains(&table) && options.only_tables.contains(&table.only_config()) {
+                let subset_config = DatabaseSubsetConfig::new(table.database.to_string(), table.table.to_string());
+                table_subset_config.push(subset_config);
+            }
+        } else {
+            if !subset_tables.contains(&table) && !options.skip_config.contains(&table) {
+                let subset_config = DatabaseSubsetConfig::new(table.database.to_string(), table.table.to_string());
+                table_subset_config.push(subset_config);
+            }
+        }
+
+    }
+    match options.database_subset {
+        Some(subsets) => table_subset_config.append(&mut subsets.clone()),
+        None => println!("not subsets present")
+    }
+    table_subset_config
 }
 
 impl<'a> Source for Postgres<'a> {
     fn read<F: FnMut(OriginalQuery, Query)>(
         &self,
         options: SourceOptions,
-        query_callback: F,
+        mut query_callback: F,
     ) -> Result<(), Error> {
-        let s_port = self.port.to_string();
 
-        let mut dump_args = vec![
-            "--column-inserts", // dump data as INSERT commands with column names
-            "--no-owner",       // skip restoration of object ownership
-            "-h",
-            self.host,
-            "-p",
-            s_port.as_str(),
-            "-U",
-            self.username,
-        ];
-
-        let only_tables_args: Vec<String> = options
-            .only_tables
-            .iter()
-            .map(|cfg| format!("--table={}.{}", cfg.database, cfg.table))
-            .collect();
-        let mut only_tables_args: Vec<&str> = only_tables_args
-            .iter()
-            .map(String::as_str)
-            .collect();
-
-        dump_args.append(&mut only_tables_args);
-
-        dump_args.push(self.database);
-
-        // TODO: as for mysql we can exclude tables directly here so we can remove the skip_tables_map checks
-        let mut process = Command::new("pg_dump")
-            .env("PGPASSWORD", self.password)
-            .args(dump_args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-
-        let stdout = process
-            .stdout
-            .take()
-            .ok_or_else(|| Error::new(ErrorKind::Other, "Could not capture standard output."))?;
-
-        match &options.database_subset {
-            None => {
-                let reader = BufReader::new(stdout);
-                read_and_transform(reader, options, query_callback);
-            }
-            Some(subset_config) => {
-                let dump_reader = BufReader::new(stdout);
-                let reader = subset(dump_reader, subset_config)?;
-                read_and_transform(reader, options, query_callback);
-            }
-        };
-
-        wait_for_command(&mut process)
-    }
-}
-
-pub fn subset<R: Read>(
-    mut dump_reader: BufReader<R>,
-    subset_config: &DatabaseSubsetConfig,
-) -> Result<BufReader<File>, Error> {
-    let mut named_temp_file = tempfile::NamedTempFile::new()?;
-    let mut temp_dump_file = named_temp_file.as_file_mut();
-    let _ = io::copy(&mut dump_reader, &mut temp_dump_file)?;
-
-    let strategy = match subset_config.strategy {
-        DatabaseSubsetConfigStrategy::Random(opt) => SubsetStrategy::RandomPercent {
-            database: subset_config.database.as_str(),
-            table: subset_config.table.as_str(),
-            percent: opt.percent,
-        },
-    };
-
-    let empty_vec = Vec::new();
-    let passthrough_tables = subset_config
-        .passthrough_tables
-        .as_ref()
-        .unwrap_or(&empty_vec)
-        .iter()
-        .map(|table| PassthroughTable::new(subset_config.database.as_str(), table.as_str()))
-        .collect::<HashSet<_>>();
-
-    let subset_options = SubsetOptions::new(&passthrough_tables);
-    let subset = PostgresSubset::new(named_temp_file.path(), strategy, subset_options)?;
-
-    let named_subset_file = tempfile::NamedTempFile::new()?;
-    let mut subset_file = named_subset_file.as_file();
-
-    let _ = subset.read(
-        |row| {
-            match subset_file.write(format!("{}\n", row).as_bytes()) {
-                Ok(_) => {}
-                Err(err) => {
-                    panic!("{}", err)
+        // use pg_dump to capture the schema
+        // use copy via psql to capture the data
+        match dump_database_schema(&options, &self, &mut query_callback) {
+            Ok(_) =>
+                match dump_database_data(&options, &self, &mut query_callback) {
+                    Err(e) => Err(e),
+                    _ => Ok(())
                 }
-            };
-        },
-        |progress| {
-            info!("Database subset completion: {}%", progress.percent());
-        },
-    )?;
-
-    Ok(BufReader::new(
-        File::open(named_subset_file.path()).unwrap(),
-    ))
-}
-
-/// consume reader and apply transformation on INSERT INTO queries if needed
-pub fn read_and_transform<R: Read, F: FnMut(OriginalQuery, Query)>(
-    reader: BufReader<R>,
-    options: SourceOptions,
-    mut query_callback: F,
-) {
-    // create a map variable with Transformer by column_name
-    let mut transformer_by_db_and_table_and_column_name: HashMap<String, &Box<dyn Transformer>> =
-        HashMap::with_capacity(options.transformers.len());
-
-    for transformer in options.transformers {
-        let _ = transformer_by_db_and_table_and_column_name.insert(
-            transformer.database_and_quoted_table_and_column_name(),
-            transformer,
-        );
-    }
-
-    let mut skip_tables_map: HashMap<String, bool> =
-        HashMap::with_capacity(options.skip_config.len());
-    for skip in options.skip_config {
-        let _ = skip_tables_map.insert(format!("{}.{}", skip.database, skip.table), true);
-    }
-
-    match list_sql_queries_from_dump_reader(reader, |query| {
-        let tokens = get_tokens_from_query_str(query);
-
-        match get_row_type(&tokens) {
-            RowType::InsertInto {
-                database_name,
-                table_name,
-            } => {
-                if !skip_tables_map.contains_key(&format!("{}.{}", database_name, table_name)) {
-                    let (original_columns, columns) = transform_columns(
-                        database_name.as_str(),
-                        table_name.as_str(),
-                        &tokens,
-                        &transformer_by_db_and_table_and_column_name,
-                    );
-
-                    query_callback(
-                        to_query(
-                            Some(database_name.as_str()),
-                            InsertIntoQuery {
-                                table_name: table_name.to_string(),
-                                columns: original_columns,
-                            },
-                        ),
-                        to_query(
-                            Some(database_name.as_str()),
-                            InsertIntoQuery {
-                                table_name: table_name.to_string(),
-                                columns,
-                            },
-                        ),
-                    )
-                }
-            }
-            RowType::CreateTable {
-                database_name,
-                table_name,
-            } => {
-                if !skip_tables_map.contains_key(&format!("{}.{}", database_name, table_name)) {
-                    no_change_query_callback(query_callback.borrow_mut(), query);
-                }
-            }
-            RowType::AlterTable {
-                database_name,
-                table_name,
-            } => {
-                if !skip_tables_map.contains_key(&format!("{}.{}", database_name, table_name)) {
-                    no_change_query_callback(query_callback.borrow_mut(), query);
-                }
-            }
-            RowType::Others => {
-                // other rows than `INSERT INTO ...` and `CREATE TABLE ...`
-                no_change_query_callback(query_callback.borrow_mut(), query);
-            }
+            Err(e) =>
+                Err(e)
         }
+    }
+}
 
+/// schema sourced from pg_dump, and thus lots of query
+/// no transformations required, output can be read verbatim
+pub fn read_schema<R: Read, F: FnMut(OriginalQuery, Query)>(reader: BufReader<R>, query_callback: &mut F) {
+    list_sql_queries_from_dump_reader(reader, |query| {
+        //queries.push(query.to_string());
+        unmodified_callback(query.to_string(), query_callback);
         ListQueryResult::Continue
-    }) {
-        Ok(_) => {}
-        Err(err) => panic!("{:?}", err),
-    }
+    }).unwrap();
 }
 
-fn no_change_query_callback<F: FnMut(OriginalQuery, Query)>(query_callback: &mut F, query: &str) {
+pub fn unmodified_callback<F: FnMut(OriginalQuery, Query)>(query: String, query_callback: &mut F) {
     query_callback(
-        // there is no diff between the original and the modified one
         Query(query.as_bytes().to_vec()),
         Query(query.as_bytes().to_vec()),
     );
 }
 
-fn transform_columns(
-    database_name: &str,
-    table_name: &str,
-    tokens: &Vec<Token>,
-    transformer_by_db_and_table_and_column_name: &HashMap<String, &Box<dyn Transformer>>,
-) -> (Vec<Column>, Vec<Column>) {
-    // find database name by filtering out all queries starting with
-    // INSERT INTO <database>.<table> (...)
-    // INSERT       -> position 0
-    // INTO         -> position 2
-    // <table>      -> position 6
-    // L Paren      -> position X?
-    // R Paren      -> position X?
-    let column_names = get_column_names_from_insert_into_query(&tokens);
-    let column_values = get_column_values_from_insert_into_query(&tokens);
-    assert_eq!(column_names.len(), column_values.len(), "Column names do not match values: got {} names and {} values", column_names.len(), column_values.len());
-
-    let mut original_columns = vec![];
-    let mut columns = vec![];
-
-    for (i, column_name) in column_names.iter().enumerate() {
-        let value_token = column_values.get(i).unwrap();
-
-        let column = match value_token {
-            Token::Number(column_value, _) => {
-                if column_value.contains(".") {
-                    Column::FloatNumberValue(
-                        column_name.to_string(),
-                        column_value.parse::<f64>().unwrap(),
-                    )
-                } else {
-                    Column::NumberValue(
-                        column_name.to_string(),
-                        column_value.parse::<i128>().unwrap(),
-                    )
-                }
-            }
-            Token::Char(column_value) => {
-                Column::CharValue(column_name.to_string(), column_value.clone())
-            }
-            Token::SingleQuotedString(column_value) => {
-                Column::StringValue(column_name.to_string(), column_value.clone())
-            }
-            Token::NationalStringLiteral(column_value) => {
-                Column::StringValue(column_name.to_string(), column_value.clone())
-            }
-            Token::HexStringLiteral(column_value) => {
-                Column::StringValue(column_name.to_string(), column_value.clone())
-            }
-            Token::Word(w)
-                if (w.value == "true" || w.value == "false")
-                    && w.quote_style == None
-                    && w.keyword == NoKeyword =>
-            {
-                Column::BooleanValue(column_name.to_string(), w.value.parse::<bool>().unwrap())
-            }
-            _ => Column::None(column_name.to_string()),
-        };
-
-        // get the right transformer for the right column name
-        let original_column = column.clone();
-
-        let db_and_table_and_column_name =
-            format!("{}.{}.{}", database_name, table_name, *column_name);
-        let column = match transformer_by_db_and_table_and_column_name
-            .get(db_and_table_and_column_name.as_str())
-        {
-            Some(transformer) => transformer.transform(column), // apply transformation on the column
-            None => column,
-        };
-
-        original_columns.push(original_column);
-        columns.push(column);
-    }
-
-    (original_columns, columns)
-}
-
-fn is_insert_into_statement(tokens: &Vec<Token>) -> bool {
-    match_keyword_at_position(Keyword::Insert, &tokens, 0)
-        && match_keyword_at_position(Keyword::Into, &tokens, 2)
-}
-
-fn is_create_table_statement(tokens: &Vec<Token>) -> bool {
-    match_keyword_at_position(Keyword::Create, &tokens, 0)
-        && match_keyword_at_position(Keyword::Table, &tokens, 2)
-}
-
-fn is_alter_table_statement(tokens: &Vec<Token>) -> bool {
-    match_keyword_at_position(Keyword::Alter, &tokens, 0)
-        && match_keyword_at_position(Keyword::Table, &tokens, 2)
-}
-
-fn get_row_type(tokens: &Vec<Token>) -> RowType {
-    let mut row_type = RowType::Others;
-
-    if is_insert_into_statement(&tokens) {
-        if let Some(database_name) = get_word_value_at_position(&tokens, 4) {
-            if let Some(table_name) = get_word_value_at_position(&tokens, 6) {
-                row_type = RowType::InsertInto {
-                    database_name: database_name.to_string(),
-                    table_name: table_name.to_string(),
-                };
-            }
-        }
-    }
-
-    if is_create_table_statement(&tokens) {
-        if let Some(database_name) = get_word_value_at_position(&tokens, 4) {
-            if let Some(table_name) = get_word_value_at_position(&tokens, 6) {
-                row_type = RowType::CreateTable {
-                    database_name: database_name.to_string(),
-                    table_name: table_name.to_string(),
-                };
-            }
-        }
-    }
-
-    if is_alter_table_statement(&tokens) {
-        let database_name_pos = if match_keyword_at_position(Keyword::Only, &tokens, 4) {
-            6
-        } else {
-            4
-        };
-
-        let table_name_pos = if match_keyword_at_position(Keyword::Only, &tokens, 4) {
-            8
-        } else {
-            6
-        };
-
-        if let Some(database_name) = get_word_value_at_position(&tokens, database_name_pos) {
-            if let Some(table_name) = get_word_value_at_position(&tokens, table_name_pos) {
-                row_type = RowType::AlterTable {
-                    database_name: database_name.to_string(),
-                    table_name: table_name.to_string(),
-                };
-            }
-        }
-    }
-
-    row_type
-}
-
-fn to_query(database: Option<&str>, query: InsertIntoQuery) -> Query {
-    let mut column_names = Vec::with_capacity(query.columns.len());
-    let mut values = Vec::with_capacity(query.columns.len());
-
-    for column in query.columns {
-        match column {
-            Column::NumberValue(column_name, value) => {
-                column_names.push(column_name);
-                values.push(value.to_string());
-            }
-            Column::FloatNumberValue(column_name, value) => {
-                column_names.push(column_name);
-                values.push(value.to_string());
-            }
-            Column::StringValue(column_name, value) => {
-                column_names.push(column_name);
-                values.push(format!("'{}'", value.replace("'", "''")));
-            }
-            Column::CharValue(column_name, value) => {
-                column_names.push(column_name);
-                values.push(format!("'{}'", value));
-            }
-            Column::BooleanValue(column_name, value) => {
-                column_names.push(column_name);
-                values.push(value.to_string());
-            }
-            Column::None(column_name) => {
-                column_names.push(column_name);
-                values.push("NULL".to_string());
-            }
-        }
-    }
-
-    let query_prefix = match database {
-        Some(database) => format!("INSERT INTO {}.", database),
-        None => "INSERT INTO ".to_string(),
-    };
-
-    let query_string = format!(
-        "{}{} ({}) VALUES ({});",
-        query_prefix,
-        query.table_name.as_str(),
-        column_names.join(", "),
-        values.join(", "),
+pub fn modified_callback<F: FnMut(OriginalQuery, Query)>(a_query: String, b_query: String, query_callback: &mut F) {
+    query_callback(
+        Query(a_query.as_bytes().to_vec()),
+        Query(b_query.as_bytes().to_vec()),
     );
+}
 
-    Query(query_string.into_bytes())
+/// table data is csv formatted data, produced by psql calling the copy command
+/// batching is possible here
+pub fn read_table_data<R: Read, F: FnMut(OriginalQuery, Query)>(
+    reader: BufReader<R>,
+    options: &SourceOptions,
+    subset_config: DatabaseSubsetConfig,
+    query_callback: &mut F,
+    columns: SortedVec<DbColumnConfig>,
+) {
+    let sql_copy_template = generate_sql_copy_template(&subset_config, &columns);
+
+    let _ = list_sql_copy_csv_from_dump_reader(reader, 1000, |csv_rows| {
+        let query = format!("{}\n{}\n\\.\n", sql_copy_template, csv_rows);
+
+        match get_applicable_transformers(subset_config.table_config(), options) {
+            Some(transformers) => {
+                let transformed_csv_rows: String = transform_csv(csv_rows.to_string(), &columns, transformers);
+                let transformed_query = format!("{}\n{}\n\\.", sql_copy_template, transformed_csv_rows);
+                modified_callback(query.clone(), transformed_query, query_callback)
+            }
+            None => unmodified_callback(query.clone(), query_callback)
+        };
+        ListQueryResult::Continue
+    });
+}
+
+pub fn get_applicable_transformers<'a>(table: DbTableConfig, options: &SourceOptions<'a>) -> Option<HashMap<String, &'a Box<dyn Transformer>>> {
+    // create a map variable with Transformer by column_name
+    let mut transformers: HashMap<String, &Box<dyn Transformer>> = HashMap::new();
+    for transformer in options.transformers {
+        if transformer.table_name() == table.table && transformer.database_name() == table.database {
+            let _ = transformers.insert(
+                transformer.column_name().to_string(),
+                transformer,
+            );
+        }
+    }
+    if transformers.len() == 0 {
+        None
+    } else {
+        Some(transformers)
+    }
+}
+
+pub fn transform_csv(csv: String, columns: &SortedVec<DbColumnConfig>, transformers: HashMap<String, &Box<dyn Transformer>>) -> String {
+    let csv = CsvSubSource::new(csv, columns.to_vec(), transformers).process();
+    csv
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-    use std::str;
-    use std::vec;
-
-    use crate::config::{
-        DatabaseSubsetConfig, DatabaseSubsetConfigStrategy, DatabaseSubsetConfigStrategyRandom,
-        SkipConfig,
-    };
-    use crate::source::postgres::{to_query, Postgres};
+    use sorted_vec::SortedVec;
+    use crate::config::{DbColumnConfig, DbTableConfig, OnlyTablesConfig, SourceConfig};
+    use crate::source::postgres::{database_tables_subset_config, generate_sql_copy_template, get_applicable_transformers, get_copy_args, get_dump_args, Postgres, subset_tables};
     use crate::source::SourceOptions;
-    use crate::transformer::random::RandomTransformer;
-    use crate::transformer::transient::TransientTransformer;
     use crate::transformer::Transformer;
-    use crate::types::{Column, InsertIntoQuery};
-    use crate::Source;
+    use crate::config::DatabaseSubsetConfigStrategy::ForeignKey;
+
+    use super::*;
+    use mockall_double::double;
+
 
     fn get_postgres() -> Postgres<'static> {
-        Postgres::new("localhost", 5432, "root", "root", "password")
+        Postgres::new("postgres://root:password@localhost:5432/root",
+                      "localhost",
+                      5432,
+                      "root",
+                      "root",
+                      "password"
+        )
     }
 
-    fn get_invalid_postgres() -> Postgres<'static> {
-        Postgres::new("localhost", 5432, "root", "root", "wrongpassword")
-    }
-
-    #[test]
-    fn connect() {
-        let p = get_postgres();
-        let t1: Box<dyn Transformer> = Box::new(TransientTransformer::default());
-        let transformers = vec![t1];
-        let source_options = SourceOptions {
-            transformers: &transformers,
-            skip_config: &vec![],
-            database_subset: &None,
-            only_tables: &vec![],
-        };
-
-        assert!(p.read(source_options, |original_query, query| {}).is_ok());
-
-        let p = get_invalid_postgres();
-        let t1: Box<dyn Transformer> = Box::new(TransientTransformer::default());
-        let transformers = vec![t1];
-        let source_options = SourceOptions {
-            transformers: &transformers,
-            skip_config: &vec![],
-            database_subset: &None,
-            only_tables: &vec![],
-        };
-
-        assert!(p.read(source_options, |original_query, query| {}).is_err());
-    }
-
-    #[test]
-    fn list_rows() {
-        let p = get_postgres();
-        let t1: Box<dyn Transformer> = Box::new(TransientTransformer::default());
-        let transformers = vec![t1];
-        let source_options = SourceOptions {
-            transformers: &transformers,
-            skip_config: &vec![],
-            database_subset: &None,
-            only_tables: &vec![],
-        };
-
-        let _ = p.read(source_options, |original_query, query| {
-            assert!(original_query.data().len() > 0);
-            assert!(query.data().len() > 0);
-        });
+    fn get_source_yaml() -> String {
+        r#"
+connection_uri: postgres://root:password@localhost:5432/root
+skip:
+  - database: public
+    table: states
+  - database: public
+    table: order_details
+transformers:
+  - database: public
+    table: employees
+    columns:
+      - name: first_name
+        transformer_name: first-name
+      - name: last_name
+        transformer_name: random
+      - name: mobile
+        transformer_name: mobile-number
+        transformer_options:
+          country_code: 1
+          length: 10
+only_tables: # optional - dumps only specified tables.
+  - database: public
+    table: orders
+  - database: public
+    table: customers
+database_subset:
+  - database: public
+    table: customers
+    strategy_name: foreign-key
+    strategy_options:
+      condition: merchant_id in (1980, 1672, 1823)
+"#.to_string()
     }
 
     #[test]
-    fn test_to_row() {
-        let query = to_query(
-            None,
-            InsertIntoQuery {
-                table_name: "test".to_string(),
-                columns: vec![Column::StringValue(
-                    "first_name".to_string(),
-                    "romaric".to_string(),
-                )],
-            },
-        );
+    fn should_collect_subset_tables() {
+        let source_options_yaml = get_source_yaml();
+        let config: SourceConfig = serde_yaml::from_str(&source_options_yaml).unwrap();
+        let empty_config: Vec<DbTableConfig> = vec![];
+        let default_config: Vec<OnlyTablesConfig> = vec![];
+        let mut transformers: Vec<Box<dyn Transformer>> = vec![];
 
-        assert_eq!(
-            query.data(),
-            b"INSERT INTO test (first_name) VALUES ('romaric');"
-        );
+        let options = SourceOptions::new(&config, &empty_config, &default_config, &mut transformers).unwrap();
 
-        let query = to_query(
-            None,
-            InsertIntoQuery {
-                table_name: "test".to_string(),
-                columns: vec![Column::StringValue(
-                    r#""firstName""#.to_string(),
-                    "romaric".to_string(),
-                )],
-            },
-        );
-        assert_eq!(
-            query.data(),
-            b"INSERT INTO test (\"firstName\") VALUES ('romaric');"
-        );
+        let tables = subset_tables(&options);
 
-        let query = to_query(
-            None,
-            InsertIntoQuery {
-                table_name: "test".to_string(),
-                columns: vec![Column::BooleanValue("is_valid".to_string(), true)],
-            },
-        );
+        println!("tables {:?}", tables);
 
-        assert_eq!(query.data(), b"INSERT INTO test (is_valid) VALUES (true);");
-
-        let query = to_query(
-            Some("public"),
-            InsertIntoQuery {
-                table_name: "test".to_string(),
-                columns: vec![
-                    Column::StringValue("first_name".to_string(), "romaric".to_string()),
-                    Column::FloatNumberValue("height_in_meters".to_string(), 1.78),
-                ],
-            },
-        );
-
-        assert_eq!(
-            query.data(),
-            b"INSERT INTO public.test (first_name, height_in_meters) VALUES ('romaric', 1.78);"
-        );
-
-        let query = to_query(
-            Some("public"),
-            InsertIntoQuery {
-                table_name: "test".to_string(),
-                columns: vec![
-                    Column::None("first_name".to_string()),
-                    Column::FloatNumberValue("height_in_meters".to_string(), 1.78),
-                ],
-            },
-        );
-
-        assert_eq!(
-            query.data(),
-            b"INSERT INTO public.test (first_name, height_in_meters) VALUES (NULL, 1.78);"
-        );
-
-        let query = to_query(
-            Some("public"),
-            InsertIntoQuery {
-                table_name: "test".to_string(),
-                columns: vec![
-                    Column::StringValue("first_name".to_string(), "romaric".to_string()),
-                    Column::FloatNumberValue("height_in_meters".to_string(), 1.78),
-                    Column::StringValue(
-                        "description".to_string(),
-                        "I'd like to say... I don't know.".to_string(),
-                    ),
-                ],
-            },
-        );
-
-        assert_eq!(
-            query.data(),
-            b"INSERT INTO public.test (first_name, height_in_meters, description) \
-            VALUES ('romaric', 1.78, 'I''d like to say... I don''t know.');"
-        );
+        let table = tables.last().unwrap();
+        assert!(table.table == "customers");
+        assert!(table.database == "public");
     }
 
     #[test]
-    fn list_rows_and_hide_last_name() {
-        let p = get_postgres();
+    fn should_collect_subset_config(){
+        let source_options_yaml = get_source_yaml();
+        let config: SourceConfig = serde_yaml::from_str(&source_options_yaml).unwrap();
+        let empty_config: Vec<DbTableConfig> = vec![];
+        let default_config: Vec<OnlyTablesConfig> = vec![];
+        let mut transformers: Vec<Box<dyn Transformer>> = vec![];
 
-        let database_name = "public";
-        let table_name = "employees";
-        let column_name_to_obfuscate = "last_name";
+        let options = SourceOptions::new(&config, &empty_config, &default_config, &mut transformers).unwrap();
 
-        let t1: Box<dyn Transformer> = Box::new(TransientTransformer::default());
-        let t2: Box<dyn Transformer> = Box::new(RandomTransformer::new(
-            database_name,
-            table_name,
-            column_name_to_obfuscate,
-        ));
+        let postgres = get_postgres();
 
-        let transformers = vec![t1, t2];
-        let source_options = SourceOptions {
-            transformers: &transformers,
-            skip_config: &vec![],
-            database_subset: &None,
-            only_tables: &vec![],
-        };
+        let mut query_struct_mock = QueryStruct::default();
+        query_struct_mock.expect_database_tables().returning( ||
+            vec![
+                DbTableConfig::new(String::from("public"), String::from("customers")),
+                DbTableConfig::new(String::from("public"), String::from("orders")),
+                DbTableConfig::new(String::from("public"), String::from("unrequires")),
+            ] as Vec<DbTableConfig>
+            );
 
-        let _ = p.read(source_options, |original_query, query| {
-            assert!(query.data().len() > 0);
-            assert!(query.data().len() > 0);
+        let subset_configs = database_tables_subset_config(&options, &query_struct_mock);
 
-            let query_str = str::from_utf8(query.data()).unwrap();
+        println!("config {:?}", subset_configs);
 
-            if query_str.contains(database_name)
-                && query_str.contains(table_name)
-                && query_str.starts_with("INSERT INTO")
-            {
-                assert_ne!(query.data(), original_query.data());
-                // TODO to complete to better check the column change only
-            } else {
-                assert_eq!(query.data(), original_query.data());
+        assert!(subset_configs.len() == 2);
+
+        let no_subset_config = subset_configs.first().unwrap();
+        assert!(&no_subset_config.database == "public");
+        assert!(&no_subset_config.table == "orders");
+        let no_strategy = &no_subset_config.strategy;
+        match no_strategy {
+            DatabaseSubsetConfigStrategy::None => {},
+            _ => {
+                println!("incorrect no strategy found");
+                assert!(false);
             }
-        });
+        }
+
+        let subset_config = subset_configs.last().unwrap();
+        assert!(&subset_config.database == "public");
+        assert!(&subset_config.table == "customers");
+        let strategy = &subset_config.strategy;
+        match strategy {
+            ForeignKey(strategy_config) => {
+                assert!(strategy_config.condition == "merchant_id in (1980, 1672, 1823)");
+            },
+            _ => {
+                println!("incorrect strategy found");
+                assert!(false);
+            }
+        }
     }
 
     #[test]
-    fn skip_table() {
-        let p = get_postgres();
+    fn should_generate_sql_copy_template() {
+        let source_options_yaml = get_source_yaml();
+        let config: SourceConfig = serde_yaml::from_str(&source_options_yaml).unwrap();
+        let database_subset= config.database_subset;
+        let subset_configs = database_subset.unwrap();
+        let subset_config = subset_configs.last().unwrap();
 
-        let database_name = "public";
-        let table_name = "employees";
+        let raw_columns: Vec<DbColumnConfig> = vec![
+            DbColumnConfig::new(String::from("id"), String::from("integer"), 1),
+            DbColumnConfig::new(String::from("merchant_id"), String::from("integer"), 2),
+            DbColumnConfig::new(String::from("email"), String::from("USER-DEFINED"), 3),
+            DbColumnConfig::new(String::from("mobile_number"), String::from("character varchar"), 4),
+            DbColumnConfig::new(String::from("unsubscribed"), String::from("boolean"), 5),
+            DbColumnConfig::new(String::from("values"), String::from("jsonb"), 6),
+            DbColumnConfig::new(String::from("validated"), String::from("boolean"), 7),
+            DbColumnConfig::new(String::from("created_at"), String::from("timestamp without time zone"), 8),
+        ];
+        let columns: SortedVec<DbColumnConfig> = SortedVec::from(raw_columns);
 
-        let t1: Box<dyn Transformer> = Box::new(TransientTransformer::default());
-        let skip_employees_table = SkipConfig {
-            database: database_name.to_string(),
-            table: table_name.to_string(),
-        };
+        let actual_sql = generate_sql_copy_template(subset_config, &columns);
 
-        let transformers = vec![t1];
-        let skip_config = vec![skip_employees_table];
-
-        let source_options = SourceOptions {
-            transformers: &transformers,
-            skip_config: &skip_config,
-            database_subset: &None,
-            only_tables: &vec![],
-        };
-
-        let _ = p.read(source_options, |_original_query, query| {
-            assert!(query.data().len() > 0);
-            assert!(query.data().len() > 0);
-
-            let query_str = str::from_utf8(query.data()).unwrap();
-            let unexpected_insert_into = format!("INSERT INTO {}.{}", database_name, table_name);
-            let unexpected_create_table = format!("CREATE TABLE {}.{}", database_name, table_name);
-            let unexpected_alter_table = format!("ALTER TABLE {}.{}", database_name, table_name);
-            let unexpected_alter_table_only =
-                format!("ALTER TABLE ONLY {}.{}", database_name, table_name);
-
-            if query_str.contains(unexpected_insert_into.as_str()) {
-                panic!("unexpected insert into: {}", unexpected_insert_into);
-            }
-
-            if query_str.contains(unexpected_create_table.as_str()) {
-                panic!("unexpected create table: {}", unexpected_create_table);
-            }
-
-            if query_str.contains(unexpected_alter_table.as_str()) {
-                panic!("unexpected alter table: {}", unexpected_alter_table);
-            }
-
-            if query_str.contains(unexpected_alter_table_only.as_str()) {
-                panic!(
-                    "unexpected alter table only: {}",
-                    unexpected_alter_table_only
-                );
-            }
-        });
+        println!("actual sql {}", actual_sql);
+        let expected_sql = "\\COPY public.customers (id,merchant_id,email,mobile_number,unsubscribed,values,validated,created_at) FROM stdin (delimiter E'\t', FORMAT csv, QUOTE E'T');".to_string();
+        println!("expected sql {}", expected_sql);
+        assert!(actual_sql == expected_sql);
     }
 
     #[test]
-    fn subset_options() {
-        let p = get_postgres();
-        let t1: Box<dyn Transformer> = Box::new(TransientTransformer::default());
+    fn should_assemble_get_dump_args() {
+        let source_options_yaml = get_source_yaml();
+        let config: SourceConfig = serde_yaml::from_str(&source_options_yaml).unwrap();
+        let empty_config: Vec<DbTableConfig> = vec![];
+        let default_config: Vec<OnlyTablesConfig> = vec![];
+        let mut transformers: Vec<Box<dyn Transformer>> = vec![];
 
-        let source_options = SourceOptions {
-            transformers: &vec![t1],
-            skip_config: &vec![],
-            database_subset: &Some(DatabaseSubsetConfig {
-                database: "public".to_string(),
-                table: "orders".to_string(),
-                strategy: DatabaseSubsetConfigStrategy::Random(
-                    DatabaseSubsetConfigStrategyRandom { percent: 50 },
-                ),
-                passthrough_tables: None,
-            }),
-            only_tables: &vec![],
-        };
+        let options = SourceOptions::new(&config, &empty_config, &default_config, &mut transformers).unwrap();
 
-        let mut rows_percent_50 = vec![];
-        let _ = p.read(source_options, |_original_query, query| {
-            assert!(query.data().len() > 0);
-            rows_percent_50.push(String::from_utf8_lossy(query.data().as_slice()).to_string());
-        });
+        let postgres = get_postgres();
 
-        let x = rows_percent_50
-            .iter()
-            .filter(|x| x.contains("INSERT INTO"))
-            .map(|x| x.as_str())
-            .collect::<HashSet<_>>();
+        let args = get_dump_args(&options, &postgres);
+        println!("dump args {:?}", args);
 
-        let y = rows_percent_50
-            .iter()
-            .filter(|x| x.contains("INSERT INTO"))
-            .map(|x| x.as_str())
-            .collect::<Vec<_>>();
+        let a1 = args.get(0).unwrap();
+        let a2 = args.get(1).unwrap();
+        let a3 = args.get(2).unwrap();
+        let a4 = args.get(3).unwrap();
+        let a5 = args.get(4).unwrap();
+        let a6 = args.get(5).unwrap();
 
-        // check that there is no duplicated rows
-        assert_eq!(x.len(), y.len());
+        assert!(a1 == "--no-owner");
+        assert!(a2 == "-d");
+        assert!(a3 == "postgres://root:password@localhost:5432/root");
+        assert!(a4 == "--schema-only");
+        assert!(a5 == "--table=public.orders");
+        assert!(a6 == "--table=public.customers");
+    }
 
-        let t1: Box<dyn Transformer> = Box::new(TransientTransformer::default());
+    #[test]
+    fn should_assemble_get_copy_args(){
+        let source_options_yaml = get_source_yaml();
+        let config: SourceConfig = serde_yaml::from_str(&source_options_yaml).unwrap();
+        let database_subset= config.database_subset;
+        let subset_configs = database_subset.unwrap();
+        let subset_config = subset_configs.last().unwrap();
 
-        let source_options = SourceOptions {
-            transformers: &vec![t1],
-            skip_config: &vec![],
-            database_subset: &Some(DatabaseSubsetConfig {
-                database: "public".to_string(),
-                table: "orders".to_string(),
-                strategy: DatabaseSubsetConfigStrategy::Random(
-                    DatabaseSubsetConfigStrategyRandom { percent: 30 },
-                ),
-                passthrough_tables: None,
-            }),
-            only_tables: &vec![],
-        };
+        let connection_uri = "postgres://root:password@localhost:5432/root";
+        let args = get_copy_args(subset_config, connection_uri);
+        println!("copy args {:?}", args);
 
-        let mut rows_percent_30 = vec![];
-        let _ = p.read(source_options, |_original_query, query| {
-            assert!(query.data().len() > 0);
-            rows_percent_30.push(String::from_utf8_lossy(query.data().as_slice()).to_string());
-        });
+        let a1 = args.get(0).unwrap();
+        let a2 = args.get(1).unwrap();
+        let a3 = args.get(2).unwrap();
+        let a4 = args.get(3).unwrap();
 
-        // check that there is no duplicated rows
-        assert_eq!(
-            rows_percent_30
-                .iter()
-                .filter(|x| x.contains("INSERT INTO"))
-                .collect::<HashSet<_>>()
-                .len(),
-            rows_percent_30
-                .iter()
-                .filter(|x| x.contains("INSERT INTO"))
-                .collect::<Vec<_>>()
-                .len(),
-        );
+        assert!(a1 == "-Atx");
+        assert!(a2 == "postgres://root:password@localhost:5432/root");
+        assert!(a3 == "-c");
 
-        assert!(rows_percent_30.len() < rows_percent_50.len());
+        let expect_query = "\\copy (select * from public.customers where merchant_id in (1980, 1672, 1823)) to stdout with (delimiter E'\\t', FORMAT csv, QUOTE E'T');";
+        assert_eq!(a4, expect_query);
+    }
+
+    #[test]
+    fn should_extract_applicable_transformers() {
+
+        let source_options_yaml = get_source_yaml();
+        let config: SourceConfig = serde_yaml::from_str(&source_options_yaml).unwrap();
+
+        let empty_config: Vec<DbTableConfig> = vec![];
+        let default_config: Vec<OnlyTablesConfig> = vec![];
+        let mut transformers: Vec<Box<dyn Transformer>> = vec![];
+
+        let options = SourceOptions::new(&config, &empty_config, &default_config, &mut transformers).unwrap();
+        let postgres = get_postgres();
+        let table_config = DbTableConfig::new(String::from("public"), String::from("employees"));
+
+        let applicable_transformers = get_applicable_transformers(table_config, &options).unwrap();
+
+        let first_name_transformer = applicable_transformers.get("first_name");
+        let last_name_transformer = applicable_transformers.get("last_name");
+        let mobile_transformer = applicable_transformers.get("mobile");
+        let email_transformer = applicable_transformers.get("email");
+
+        assert!(matches!(first_name_transformer, Some {..}));
+        assert!(matches!(last_name_transformer, Some{..}));
+        assert!(matches!(mobile_transformer, Some{..}));
+        assert!(matches!(email_transformer, None{..}));
     }
 }

@@ -22,6 +22,9 @@ replibyte -c conf.yaml transformer list
  email           | Generate an email address (string only). [john.doe@company.com]->[tony.stark@avengers.com]
  first-name      | Generate a first name (string only). [Lucas]->[Georges]
  phone-number    | Generate a phone number (string only).
+ mobile-number   | Generate a mobile number (string only).
+ hstore-attr     | Transform hstore values (string only).
+ blank           | set null to any field.
  random          | Randomize value but keep the same length (string only). [AAA]->[BBB]
  keep-first-char | Keep only the first character of the column.
  transient       | Does not modify the value.
@@ -188,6 +191,103 @@ SQL output:
 INSERT INTO public.my_table (contact_phone) VALUE ('+356433821');
 ```
 
+## Mobile number
+
+Generate a mobile/cell number 
+
+### Example
+
+```yaml
+source:
+  connection_uri: $DATABASE_URL
+  transformers:
+    - database: public
+      table: my_table
+      columns:
+        - name: mobile_number
+          transformer_name: mobile-number
+          transformer_options:
+            country_code: 61
+            length: 8
+           
+    
+```
+
+SQL input:
+
+```sql
+INSERT INTO public.my_table (mobile_number) VALUE ('61 785 182 291');
+```
+
+SQL output:
+
+```sql
+INSERT INTO public.my_table (contact_phone) VALUE ('1 267 528 5624');
+```
+
+## Blank
+
+Set null to any field
+
+### Example
+
+```yaml
+source:
+  connection_uri: $DATABASE_URL
+  transformers:
+    - database: public
+      table: my_table
+      columns:
+        - name: merge_field_cache
+          transformer_name: blank 
+    
+```
+
+SQL input:
+
+```sql
+INSERT INTO public.my_table (merge_field_cache) VALUE (null);
+```
+
+## Hstore Attributes
+
+change hstore attributes if they exist
+
+### Example
+
+```yaml
+source:
+  connection_uri: $DATABASE_URL
+  transformers:
+    - database: public
+      table: my_table
+      columns:
+        - name: merge_fields
+          transformer_name: hstore-attr
+          transformer_options:
+            - attribute: email 
+              transformer_name: email 
+            - attribute: mobile_phone 
+              transformer_name: mobile-number
+              transformer_options:
+                country_code: 1
+                length: 11
+    
+```
+
+SQL input:
+
+```sql
+INSERT INTO public.my_table(merge_field_cache) VALUES ('"other"=>"info","email"=>"original.doe@example.com","mobile_phone"=>"1 5624 2324 2332"');
+```
+
+
+SQL output:
+
+```sql
+INSERT INTO public.my_table(merge_field_cache) VALUES ('"other"=>"info","email"=>"john.doe@example.com","mobile_phone"=>"1 267 528 5624"');
+```
+
 ## Credit-card
 
 Generate a credit card number
@@ -284,14 +384,6 @@ Does not change anything (good for testing purpose)
 ## Custom with Web Assembly (wasm)
 
 Are you ready to get into the matrix? Take a look [here](/docs/advanced-guides/web-assembly-transformer) 👀
-
-## Nested fields
-
-:::note
-
-Support MongoDB only.
-
-:::
 
 ### Embedded sub-document (object)
 

@@ -49,7 +49,7 @@ replibyte -c conf.yaml dump restore remote -v latest
 
 ## Features
 
-- [x] Support data dump and restore for PostgreSQL, MySQL and MongoDB
+- [x] Support data dump and restore for PostgreSQL and MySQL
 - [x] Replace sensitive data with fake data
 - [x] Works on large database (> 10GB)
 - [x] Database Subsetting: Scale down a production database to a more reasonable size 🔥
@@ -58,12 +58,6 @@ replibyte -c conf.yaml dump restore remote -v latest
 - [x] On-the-fly data de/encryption (AES-256)
 - [x] Fully stateless (no server, no daemon) and lightweight binary 🍃
 - [x] Use [custom transformers](examples/wasm)
-
-Here are the features we plan to support
-
-- [ ] Auto-detect and version database schema change
-- [ ] Auto-detect sensitive fields
-- [ ] Auto-clean backed up data
 
 ## Getting Started
 

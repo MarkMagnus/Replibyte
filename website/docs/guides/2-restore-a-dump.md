@@ -46,8 +46,6 @@ It's the best option to develop locally with a consistent transformed dump comin
 replibyte -c conf.yaml dump restore local -d postgresql -v latest
 ```
 
-`-d` parameter accepts `mongodb`, `mysql` and other databases supported by Replibyte.
-
 You can also list the available dumps with:
 
 ```shell

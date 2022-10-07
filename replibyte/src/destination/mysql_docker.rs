@@ -92,11 +92,11 @@ mod tests {
     use crate::destination::Destination;
 
     fn get_mysql() -> MysqlDocker {
-        MysqlDocker::new("8".to_string(), 3308)
+        MysqlDocker::new("8".to_string(), 3355)
     }
 
     fn get_invalid_mysql() -> MysqlDocker {
-        MysqlDocker::new("bad_tag".to_string(), 3308)
+        MysqlDocker::new("bad_tag".to_string(), 3355)
     }
 
     #[test]
