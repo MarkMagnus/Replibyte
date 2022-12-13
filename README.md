@@ -20,11 +20,12 @@ Requirements
 + Focus on subsets rather than whole dumps
 + Handling postgres json and hstore data types
 + CSV data format rather than sql statements
++ Separate dump and restore files
 
 Removed stuff that's clearly not in my requirements
 + website - gone
 + mongodb - gone
-+ mysql -- probably gone soon too
++ mysql -- probably gone soon too (if it gets in my way)
 
 Add stuff
 + postgres specific transformers, hstore, json etc

@@ -1,27 +1,17 @@
----
-title: I. Create a dump
-sidebar_position: 1
----
-
 # Create a dump
-
-:::note hello 👋🏼
-
-I assume you have [Installed Replibyte](/docs/getting-started/installation) and you Read the [concepts](/docs/getting-started/concepts).
-
-:::
 
 ## Configuration
 
-To use Replibyte, you need to use to a dump from your production database. Here are three options:
+To use Replibyte, you need to use to a dump from your production or follower database. 
+Only one option use Replibyte to make a dump or better yet a partial.
 
-* **Option 1 (easiest)**: You don't, and you want Replibyte to make a dump.
-* **Option 2**: You don't, and you want to make a dump manually.
-* **Option 3**: You already have a dump from your database.
+Don't dump manually use pgdump they won't be compatible with this version of replibyte
+Don't use files dump by native database tools. Strategies are now in place that make this impractical.
 
-### Option 1: make a dump with Replibyte
+### make a dump with Replibyte
 
-To let Replibyte creating a dump from your database for you, you need to update your `conf.yaml` file with the source connection URI from your production database as a property.
+To let Replibyte creating a dump from your database for you, you need to update your `conf.yaml` file with the source 
+connection URI from your production database as a property.
 
 Pick the example that fit the database you are using.
 
@@ -38,70 +28,51 @@ source:
 
 <details>
 
-<summary>MySQL</summary>
-
-```yaml
-source:
-  connection_uri: mysql://[user]:[password]@[host]:[port]/[database]
-```
-
-</details>
-
-<details>
-
-### Option 2: Make a dump manually
-
-Here are the commands to dump your database yourself
-
-<details>
-
-<summary>PostgreSQL</summary>
-
-```yaml
-pg_dump --column-inserts --no-owner -h [host] -p [port] -U [username] [database]
-```
-
-</details>
-
-<details>
-
-<summary>MySQL</summary>
-
-```yaml
-mysqldump -h [host] -P [port] -u [username] -p --add-drop-database --add-drop-table --skip-extended-insert --complete-insert --single-transaction --quick --databases
-```
-
-</details>
-
-
-### Option 3: You already have a dump
-
-You have nothing to do, but it is possible that some options are missing from your dump, then you'll need to use the [option 2](#option-2-make-a-dump-manually)
-
-## Hide sensitive data with Transformers
-
-
-By using [Transformers](/docs/transformers), you can change on the fly your database data. Let's say we have the following structure for a table `employees`
+By using [Transformers](/docs/transformers), you can change on the fly your database data. 
+Let's say we have the following structure for a table `employees`
 
 ```sql
 CREATE TABLE public.customers (
-    id bpchar NOT NULL,
+    id integer NOT NULL,
+    merchant_id integer not null,
     first_name character varying(30) NOT NULL,
     last_name character varying(30) NOT NULL,
-    contact_email character varying(2048) NOT NULL,
-    contact_phone character varying(24)
+    email character varying(2048) NOT NULL,
+    mobile character varying(24),
+    attributes jsonb default '{}',
+    cache hstore default '',
+    access_key character varying(30)
 );
 ```
 
 with the following entries:
 
 ```sql
-INSERT INTO public.customers (id, first_name, last_name, contact_email, contact_phone) VALUES ('ALFKI', 'Maria', 'Anders', 'maria.anders@gmail.com', '030-0074321');
-INSERT INTO public.customers (id, first_name, last_name, contact_email, contact_phone) VALUES ('ANATR', 'Ana', 'Trujillo', 'ana@factchecker.com', '(5) 555-4729');
-INSERT INTO public.customers (id, first_name, last_name, contact_email, contact_phone) VALUES ('ANTON', 'Antonio', 'Moreno', 'anto.moreno@gmail.com', NULL);
-```
 
-and you want to hide the `first_name`, `last_name`, `contact_email` and the `contact_phone` fields. You can use the following configuration in your `conf.yaml` file.
+INSERT INTO public.customers (id, merchant_id, first_name, last_name, email, mobile, attributes, cache, access_key)
+VALUES (1, 1, 'Mark', 'Magoo', 'mark.magoo@gmail.com', '1234274321', '{"alt_email": "mark.magoo2@gmail.com", "options": "1"}', 'confirmation_key=>129334', '34398409-980eu9');
+
+INSERT INTO public.customers (id, merchant_id, first_name, last_name, email, mobile, attributes, cache, access_key)
+VALUES (1, 2, 'Maria', 'Anders', 'maria.anders@gmail.com', '030-0074321', '{"alt_email": "anders.family@gmail.com", "options": "2"}', 'confirmation_key=>118374', '12934980-0.09.p');
+
+INSERT INTO public.customers (id, merchant_id, first_name, last_name, email, mobile, attributes, cache, access_key)
+VALUES (1, 2, 'Ana', 'Trujillo', 'ana@factchecker.com', '(5) 555-4729', '{"alt_mobile": "128937982392", "alt_email": "facts.info@gmail.com", "options": "1"}', 'confirmation_key=>129343', '932809u0-90809e9');
+
+INSERT INTO public.customers (id, merchant_id, first_name, last_name, email, mobile, attributes, cache, access_key)
+VALUES (1, 3, 'Antonio', 'Moreno', 'anto.moreno@gmail.com', NULL, '{"alt_email": "anto.moreno@hotmail.com", "options": "1"}', 'confirmation_key=>123948', '90809oeuhn.-rgroeut');
+
+
+select *, attributes->>'alt_email' as alternative_email,
+    cache->'confirmation_key' as last_email_confirmation_key
+from customers;
+
+
+```
+and you want to mask/transform `last_name`, `email` and `mobile` fields.
+and hide specific attributes in `attributes` and `cache` fields.
+and completely obliterate `access_key field.`
+and you don't want all records that belong to customer from merchant_id == 2
+You can use the following configuration in your `conf.yaml` file.
 
 ```yaml title="source and transformers in your conf.yaml"
 source:
@@ -110,21 +81,35 @@ source:
     - database: public
       table: customers
       columns:
-        - name: first_name
-          transformer_name: first-name
         - name: last_name
           transformer_name: random
-        - name: contact_phone
-          transformer_name: phone-number
+        - name: mobile
+          transformer_name: mobile-number
+          transformer_options:
+            country_code: 1
+            length: 10 
         - name: contact_email
           transformer_name: email
+        - name: attributes
+          transformer_name: jsonb-attr
+          transformer_options:
+            - attribute: alt_email 
+              transformer_name: email 
+            - attribute: alt_mobile 
+              transformer_name: mobile-number
+              transformer_options:
+                country_code: 1
+                length: 11
+        - name: cache
+          transformer_name: hstore-attr
+          transformer_options:
+            - attribute: confirmation_key 
+              transformer_name: random
+        - name: access_key
+          transformer_name: blank           
 ```
 
-By using [Transformers](/docs/transformers), you keep your sensitive data safe of being leaked. 
-
 ## Run
-
-It's the big day! Let's **run and upload** our transformed dump. But wait, something is missing. If you read about the [concepts](/docs/getting-started/concepts), and [how Replibyte works](/docs/how-replibyte-works), you know that a [Datastore](/docs/getting-started/concepts#datastore) is required to upload the transformed dump. Here is the lines you need to add in your `conf.yaml`
 
 ```yaml title="Add your datastore in your conf.yaml"
 datastore:
@@ -137,73 +122,14 @@ datastore:
       session_token: XXX # optional
 ```
 
-Here the datastore is a S3 bucket where the dump will be stored and accessible for future restore (next guide).
-
-The final `conf.yaml` to create a final transformed dump looks like this:
-
-:::caution
-
-Do not forget to change your bucket name!
-
-:::
-
-```yaml title="conf.yaml"
-source:
-  connection_uri: postgres://user:password@host:port/db # optional - use only for option #1
-  transformers:
-    - database: public
-      table: customers
-      columns:
-        - name: first_name
-          transformer_name: first-name
-        - name: last_name
-          transformer_name: random
-        - name: contact_phone
-          transformer_name: phone-number
-        - name: contact_email
-          transformer_name: email
-datastore:
-  aws:
-    bucket: my-replibyte-dumps
-    region: us-east-2
-    credentials:
-      access_key_id: $ACCESS_KEY_ID
-      secret_access_key: $AWS_SECRET_ACCESS_KEY
-      session_token: XXX # optional
-```
-
-:::note
-
-Check out [all the Datastore available](/docs/datastores).
-
-:::
-
-Finally, you can run the following command according to you chosen option above:
 
 <details>
 
-<summary>Option 1: Make a dump with Replibyte</summary>
+<summary>Make a dump with Replibyte</summary>
 
 ```shell
 replibyte -c conf.yaml dump create
 ```
 
 </details>
-
-<details>
-
-<summary>Option 2 and 3: Create a transformed dump from a dump file</summary>
-
-```shell
-cat your_dump.sql | replibyte -c conf.yaml dump create -i -s postgresql
-```
-
-`-i` parameter is required to read the data from the input.
-
-`-s` parameter is required if you don't have a `source.connection_uri` in the configuration file. (Valid values are `postgresql`, `postgres`, `mysql`)
-
-
 </details>
-
----
-Now, it's time to look at how to restore your transformed dump ➡️

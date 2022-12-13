@@ -1,7 +1,5 @@
 use crate::transformer::Transformer;
 use crate::types::Column;
-use rand::distributions::Alphanumeric;
-use rand::Rng;
 
 /// This struct is dedicated to generating random elements.
 pub struct BlankTransformer {

@@ -1,4 +1,3 @@
-use crate::config::TransformerTypeConfig::HstoreAttr;
 use crate::transformer::blank::BlankTransformer;
 use crate::transformer::credit_card::CreditCardTransformer;
 use crate::transformer::email::EmailTransformer;
