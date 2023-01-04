@@ -1,6 +1,6 @@
 # Dump Parser
 
-Library to parse and edit database dump for Postgres, MySQL and MongoDB.
+Library to parse and edit database dump for Postgres, MySQL.
 
 
 Example for Postgres

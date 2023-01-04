@@ -84,9 +84,8 @@ impl TelemetryClient {
                 props.insert(
                     "database".to_string(),
                     match x.connection_uri()? {
-                        ConnectionUri::Postgres(_, _, _, _, _) => "postgresql",
+                        ConnectionUri::Postgres(_, _, _, _, _, _) => "postgresql",
                         ConnectionUri::Mysql(_, _, _, _, _) => "mysql",
-                        ConnectionUri::MongoDB(_, _) => "mongodb",
                     }
                     .to_string(),
                 );
@@ -115,10 +114,13 @@ impl TelemetryClient {
                                 TransformerTypeConfig::Email => "email",
                                 TransformerTypeConfig::KeepFirstChar => "keep-first-char",
                                 TransformerTypeConfig::PhoneNumber => "phone-number",
+                                TransformerTypeConfig::MobileNumber(_) => "mobile-number",
                                 TransformerTypeConfig::CreditCard => "credit-card",
                                 TransformerTypeConfig::Redacted(_) => "redacted",
                                 TransformerTypeConfig::Transient => "transient",
-                                TransformerTypeConfig::CustomWasm(_) => "custom-wasm",
+                                TransformerTypeConfig::Blank => "blank",
+                                TransformerTypeConfig::HstoreAttr(_) => "hstore-attr",
+                                TransformerTypeConfig::JsonAttr(_) => "json-attr",
                             });
                         }
                     }

@@ -7,6 +7,7 @@ use crate::types::Bytes;
 use crate::utils::{binary_exists, wait_for_command};
 
 pub struct Postgres<'a> {
+    connection_uri: &'a str,
     host: &'a str,
     port: u16,
     database: &'a str,
@@ -17,6 +18,7 @@ pub struct Postgres<'a> {
 
 impl<'a> Postgres<'a> {
     pub fn new(
+        connection_uri: &'a str,
         host: &'a str,
         port: u16,
         database: &'a str,
@@ -25,6 +27,7 @@ impl<'a> Postgres<'a> {
         wipe_database: bool,
     ) -> Self {
         Postgres {
+            connection_uri,
             host,
             port,
             database,
@@ -118,11 +121,11 @@ mod tests {
     use crate::destination::Destination;
 
     fn get_postgres() -> Postgres<'static> {
-        Postgres::new("localhost", 5453, "root", "root", "password", true)
+        Postgres::new("","localhost", 5433, "root", "root", "password", true)
     }
 
     fn get_invalid_postgres() -> Postgres<'static> {
-        Postgres::new("localhost", 5453, "root", "root", "wrongpassword", true)
+        Postgres::new("","localhost", 5433, "root", "root", "wrongpassword", true)
     }
 
     #[test]

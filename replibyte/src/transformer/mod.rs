@@ -1,9 +1,12 @@
+use crate::transformer::blank::BlankTransformer;
 use crate::transformer::credit_card::CreditCardTransformer;
-use crate::transformer::custom_wasm::CustomWasmTransformer;
 use crate::transformer::email::EmailTransformer;
 use crate::transformer::first_name::FirstNameTransformer;
+use crate::transformer::hstore_attr::HstoreAttrTransformer;
+use crate::transformer::json_attrs::JsonAttrTransformer;
 use crate::transformer::keep_first_char::KeepFirstCharTransformer;
 use crate::transformer::phone_number::PhoneNumberTransformer;
+use crate::transformer::mobile_number::MobileNumberTransformer;
 use crate::transformer::random::RandomTransformer;
 use crate::transformer::redacted::RedactedTransformer;
 use crate::transformer::transient::TransientTransformer;
@@ -14,25 +17,28 @@ pub mod email;
 pub mod first_name;
 pub mod keep_first_char;
 pub mod phone_number;
+pub mod mobile_number;
 pub mod random;
 pub mod redacted;
 pub mod transient;
-
-// FIXME: CI release build is broken because of feature flag
-//#[cfg(feature = "wasm")]
-pub mod custom_wasm;
+pub mod blank;
+pub mod hstore_attr;
+pub mod json_attrs;
 
 pub fn transformers() -> Vec<Box<dyn Transformer>> {
     vec![
         Box::new(EmailTransformer::default()),
         Box::new(FirstNameTransformer::default()),
         Box::new(PhoneNumberTransformer::default()),
+        Box::new(MobileNumberTransformer::default()),
         Box::new(RandomTransformer::default()),
         Box::new(KeepFirstCharTransformer::default()),
         Box::new(TransientTransformer::default()),
         Box::new(CreditCardTransformer::default()),
         Box::new(RedactedTransformer::default()),
-        Box::new(CustomWasmTransformer::default()),
+        Box::new(BlankTransformer::default()),
+        Box::new(HstoreAttrTransformer::default()),
+        Box::new(JsonAttrTransformer::default()),
     ]
 }
 

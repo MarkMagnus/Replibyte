@@ -1,18 +1,25 @@
+use std::any::Any;
+use std::cmp::Ordering;
 use crate::transformer::credit_card::CreditCardTransformer;
-use crate::transformer::custom_wasm::{CustomWasmTransformer, CustomWasmTransformerOptions};
 use crate::transformer::email::EmailTransformer;
 use crate::transformer::first_name::FirstNameTransformer;
 use crate::transformer::keep_first_char::KeepFirstCharTransformer;
 use crate::transformer::phone_number::PhoneNumberTransformer;
+use crate::transformer::mobile_number::{MobileNumberOptions, MobileNumberTransformer};
 use crate::transformer::random::RandomTransformer;
 use crate::transformer::redacted::{RedactedTransformer, RedactedTransformerOptions};
+use crate::transformer::blank::BlankTransformer;
+use crate::transformer::hstore_attr::{HstoreAttrTransformer, HstoreAttrOptions};
 use crate::transformer::transient::TransientTransformer;
 use crate::transformer::Transformer;
 use percent_encoding::percent_decode_str;
 use serde;
 use serde::{Deserialize, Serialize};
 use std::io::{Error, ErrorKind};
+use sorted_vec::SortedVec;
 use url::Url;
+use crate::transformer::json_attrs::{JsonAttrOptions, JsonAttrTransformer};
+use crate::types::Column;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -201,8 +208,8 @@ pub struct SourceConfig {
     pub connection_uri: Option<String>,
     pub compression: Option<bool>,
     pub transformers: Option<Vec<TransformerConfig>>,
-    pub skip: Option<Vec<SkipConfig>>,
-    pub database_subset: Option<DatabaseSubsetConfig>,
+    pub skip: Option<Vec<DbTableConfig>>,
+    pub database_subset: Option<Vec<DatabaseSubsetConfig>>,
     pub only_tables: Option<Vec<OnlyTablesConfig>>,
 }
 
@@ -230,10 +237,69 @@ impl DestinationConfig {
     }
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub struct SkipConfig {
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DbTableConfig {
     pub database: String,
     pub table: String,
+}
+
+impl PartialEq for DbTableConfig {
+    fn eq(&self, other: &Self) -> bool {
+        self.table == other.table && self.database == other.database
+    }
+}
+
+impl DbTableConfig {
+    pub(crate) fn new(database: String, table: String) -> Self {
+        DbTableConfig {
+            database,
+            table,
+        }
+    }
+
+    pub(crate) fn only_config(&self) -> OnlyTablesConfig {
+        OnlyTablesConfig {
+            database: self.database.clone(),
+            table: self.table.clone(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Eq)]
+pub struct DbColumnConfig {
+    pub column: String,
+    pub data_type: String,
+    pub ordinal: i32,
+}
+
+impl DbColumnConfig {
+
+    pub(crate) fn new(column: String, data_type: String, ordinal: i32) -> Self {
+        DbColumnConfig {
+            column,
+            data_type,
+            ordinal,
+        }
+    }
+
+}
+
+impl PartialOrd<Self> for DbColumnConfig {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for DbColumnConfig {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.ordinal.cmp(&other.ordinal)
+    }
+}
+
+pub struct RowConfig {
+   pub column_names: Vec<String>,
+   pub data_types: Vec<String>,
+   pub ordinals: Vec<i32>, 
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -246,10 +312,33 @@ pub struct DatabaseSubsetConfig {
     pub passthrough_tables: Option<Vec<String>>,
 }
 
+impl DatabaseSubsetConfig {
+    pub(crate) fn new(database: String, table: String) -> Self {
+        DatabaseSubsetConfig {
+            database,
+            table,
+            strategy: DatabaseSubsetConfigStrategy::None,
+            passthrough_tables: None
+        }
+    }
+    pub fn table_config(&self) -> DbTableConfig {
+        DbTableConfig { database: self.database.clone(), table: self.table.clone() }
+    }
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub struct OnlyTablesConfig {
     pub database: String,
     pub table: String,
+}
+
+impl OnlyTablesConfig {
+    pub fn config(&self) -> DbTableConfig {
+        DbTableConfig {
+            database: self.database.clone(),
+            table: self.table.clone(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -257,11 +346,18 @@ pub struct OnlyTablesConfig {
 #[serde(tag = "strategy_name", content = "strategy_options")]
 pub enum DatabaseSubsetConfigStrategy {
     Random(DatabaseSubsetConfigStrategyRandom),
+    ForeignKey(DatabaseSubsetConfigStrategyForeignKey),
+    None
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Copy)]
 pub struct DatabaseSubsetConfigStrategyRandom {
     pub percent: u8,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct DatabaseSubsetConfigStrategyForeignKey {
+    pub condition: String,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -289,10 +385,13 @@ pub enum TransformerTypeConfig {
     Email,
     KeepFirstChar,
     PhoneNumber,
+    MobileNumber(Option<MobileNumberOptions>),
     CreditCard,
     Redacted(Option<RedactedTransformerOptions>),
     Transient,
-    CustomWasm(CustomWasmTransformerOptions),
+    Blank,
+    HstoreAttr(HstoreAttrOptions),
+    JsonAttr(JsonAttrOptions),
 }
 
 impl TransformerTypeConfig {
@@ -304,6 +403,11 @@ impl TransformerTypeConfig {
     ) -> Box<dyn Transformer> {
         let transformer: Box<dyn Transformer> = match self {
             TransformerTypeConfig::Random => Box::new(RandomTransformer::new(
+                database_name,
+                table_name,
+                column_name,
+            )),
+            TransformerTypeConfig::Blank => Box::new(BlankTransformer::new(
                 database_name,
                 table_name,
                 column_name,
@@ -328,6 +432,36 @@ impl TransformerTypeConfig {
                 table_name,
                 column_name,
             )),
+            TransformerTypeConfig::MobileNumber(options) => {
+
+                let options = match options {
+                    Some(options) => *options,
+                    None => MobileNumberOptions::default(),
+                };
+
+                Box::new(MobileNumberTransformer::new(
+                    database_name,
+                    table_name,
+                    column_name,
+                    options,
+                ))
+            },
+            TransformerTypeConfig::HstoreAttr(options) => {
+                Box::new(HstoreAttrTransformer::new(
+                    database_name,
+                    table_name,
+                    column_name,
+                    options.clone(),
+                ))
+            },
+            TransformerTypeConfig::JsonAttr(options) => {
+                Box::new(JsonAttrTransformer::new(
+                    database_name,
+                    table_name,
+                    column_name,
+                    options.clone(),
+                ))
+            },
             TransformerTypeConfig::RandomDate => todo!(),
             TransformerTypeConfig::CreditCard => Box::new(CreditCardTransformer::new(
                 database_name,
@@ -351,24 +485,6 @@ impl TransformerTypeConfig {
                 table_name,
                 column_name,
             )),
-            TransformerTypeConfig::CustomWasm(options) => {
-                let wasm_bytes = match std::fs::read(options.path.clone()) {
-                    Ok(bytes) => bytes,
-                    Err(err) => {
-                        // The user probably provided a wrong path to the wasm file
-                        panic!("Failed to read wasm file: {}", err);
-                    }
-                };
-                let wasm_transformer =
-                    CustomWasmTransformer::new(database_name, table_name, column_name, wasm_bytes);
-                match wasm_transformer {
-                    Ok(transformer) => Box::new(transformer),
-                    Err(err) => {
-                        // The wasm which the user provided is invalid
-                        panic!("Failed to load custom wasm transformer: {}", err);
-                    }
-                }
-            }
         };
 
         transformer
@@ -384,9 +500,8 @@ type Uri = String;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum ConnectionUri {
-    Postgres(Host, Port, Username, Password, Database),
-    Mysql(Host, Port, Username, Password, Database),
-    MongoDB(Uri, Database),
+    Postgres(Uri, Host, Port, Username, Password, Database),
+    Mysql(Host, Port, Username, Password, Database)
 }
 
 fn get_host(url: &Url) -> Result<String, Error> {
@@ -470,6 +585,7 @@ fn parse_connection_uri(uri: &str) -> Result<ConnectionUri, Error> {
     let connection_uri = match url.scheme() {
         scheme if scheme.to_lowercase() == "postgres" || scheme.to_lowercase() == "postgresql" => {
             ConnectionUri::Postgres(
+                (&url.as_str()).parse().unwrap(),
                 get_host(&url)?,
                 get_port(&url, 5432)?,
                 get_username(&url)?,
@@ -484,9 +600,6 @@ fn parse_connection_uri(uri: &str) -> Result<ConnectionUri, Error> {
             get_password(&url)?,
             get_database(&url, None)?,
         ),
-        scheme if scheme.to_lowercase() == "mongodb" || scheme.to_lowercase() == "mongodb+srv" => {
-            ConnectionUri::MongoDB(url.to_string(), get_database(&url, Some("test"))?)
-        }
         scheme => {
             return Err(Error::new(
                 ErrorKind::Other,
@@ -596,6 +709,7 @@ mod tests {
         assert_eq!(
             parse_connection_uri("postgres://root:password@localhost:5432/db").unwrap(),
             ConnectionUri::Postgres(
+                "postgres://root:password@localhost:5432/db".to_string(),
                 "localhost".to_string(),
                 5432,
                 "root".to_string(),
@@ -610,6 +724,7 @@ mod tests {
         assert_eq!(
             parse_connection_uri("postgres://root@azure:password@localhost:5432/db").unwrap(),
             ConnectionUri::Postgres(
+                "postgres://root%40azure:password@localhost:5432/db".to_string(),
                 "localhost".to_string(),
                 5432,
                 "root@azure".to_string(),
@@ -619,30 +734,4 @@ mod tests {
         )
     }
 
-    #[test]
-    fn parse_mongodb_connection_uri() {
-        assert!(parse_connection_uri("mongodb://root:password").is_err());
-        assert!(parse_connection_uri("mongodb://root:password@localhost:27017").is_ok());
-        assert!(parse_connection_uri("mongodb://root:password@localhost:27017/db").is_ok());
-        assert!(parse_connection_uri("mongodb://root:@localhost:27017/db").is_ok());
-        assert!(parse_connection_uri("mongodb://root:password@localhost").is_ok());
-        assert!(parse_connection_uri("mongodb+srv://root:password@server.example.com/").is_ok());
-    }
-
-    #[test]
-    fn parse_mongodb_connection_uri_with_db() {
-        let connection_uri = parse_connection_uri(
-            "mongodb+srv://root:password@server.example.com/my_db?authSource=other_db",
-        )
-        .unwrap();
-
-        assert_eq!(
-            connection_uri,
-            ConnectionUri::MongoDB(
-                "mongodb+srv://root:password@server.example.com/my_db?authSource=other_db"
-                    .to_string(),
-                "my_db".to_string(),
-            )
-        )
-    }
 }

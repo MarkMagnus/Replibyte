@@ -88,14 +88,14 @@ pub struct RestoreLocalArgs {
     #[clap(short, long)]
     pub remove: bool,
     /// Docker image type
-    #[clap(short, long, value_name = "[postgresql | mysql | mongodb]")]
+    #[clap(short, long, value_name = "[postgresql | mysql]")]
     pub image: Option<String>,
 }
 
 /// all dump run commands
 #[derive(Args, Debug)]
 pub struct DumpCreateArgs {
-    #[clap(name = "source_type", short, long, value_name = "[postgresql | mysql | mongodb]", possible_values = &["postgresql", "mysql", "mongodb"], requires = "input")]
+    #[clap(name = "source_type", short, long, value_name = "[postgresql | mysql]", possible_values = &["postgresql", "mysql"], requires = "input")]
     /// database source type to import
     pub source_type: Option<String>,
     /// import dump from stdin

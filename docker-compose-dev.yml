@@ -1,6 +1,7 @@
 version: '3'
 
 services:
+
   source-postgres:
     image: postgres:13
     restart: always
@@ -15,7 +16,8 @@ services:
     volumes:
       - ./db/postgres:/docker-entrypoint-initdb.d/
     ports:
-      - 5432:5432
+      - "5433:5432"
+
   dest-postgres:
     image: postgres:13
     restart: always
@@ -28,7 +30,8 @@ services:
       - POSTGRES_USER=root
       - POSTGRES_PASSWORD=password
     ports:
-      - 5453:5432
+      - "5434:5432"
+
   source-mysql:
     image: mysql:8
     restart: always
@@ -43,7 +46,8 @@ services:
     volumes:
       - ./db/mysql:/docker-entrypoint-initdb.d
     ports:
-      - 3306:3306
+      - 3307:3306
+
   dest-mysql:
     image: mysql:8
     restart: always
@@ -56,35 +60,8 @@ services:
     environment:
       - MYSQL_ROOT_PASSWORD=password
     ports:
-      - 3307:3306
-  source-mongodb:
-    image: mongo:5
-    restart: always
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongo localhost:27017/test --quiet
-      timeout: 45s
-      interval: 10s
-      retries: 10
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=root
-      - MONGO_INITDB_ROOT_PASSWORD=password
-    volumes:
-      - ./db/mongodb:/docker-entrypoint-initdb.d/
-    ports:
-      - 27017:27017
-  dest-mongodb:
-    image: mongo:5
-    restart: always
-    healthcheck:
-      test: echo 'db.runCommand("ping").ok' | mongo localhost:27017/test --quiet
-      timeout: 45s
-      interval: 10s
-      retries: 10
-    environment:
-      - MONGO_INITDB_ROOT_USERNAME=root
-      - MONGO_INITDB_ROOT_PASSWORD=password
-    ports:
-      - 27018:27017
+      - 3308:3306
+
   bridge-minio:
     image: minio/minio:RELEASE.2022-03-17T06-34-49Z
     restart: always
@@ -100,6 +77,7 @@ services:
     ports:
       - 9000:9000
       - 9001:9001
+
   create-minio-bucket:
     image: minio/mc
     depends_on:

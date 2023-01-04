@@ -41,6 +41,12 @@ reqwest = { version = "0.11", features = ["blocking"] }
 chrono = {version = "0.4", features = ["serde"] }
 machine-uid = "0.2"
 percent-encoding = "2.1.0"
+regex = "1.5.5"
+postgres = "0.19.4"
+sortedvec = "0.5.0"
+sorted-vec = "0.8.0"
+csv = "1.1.6"
+mockall_double = "0.2.1"
 
 # FIXME removed until the CI release pipeline is fixed
 #wasmer = { version = "2.2", optional = true }
@@ -52,3 +58,6 @@ wasmer-wasi = { version = "2.2" }
 # FIXME same as above
 #[features]
 #wasm = ["wasmer", "wasmer-wasi"]
+
+[dev-dependencies]
+mockall = "0.11.3"

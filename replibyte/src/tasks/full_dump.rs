@@ -3,10 +3,10 @@ use std::sync::mpsc;
 use std::thread;
 
 use crate::datastore::Datastore;
-use crate::source::SourceOptions;
 use crate::tasks::{MaxBytes, Message, Task, TransferredBytes};
 use crate::types::{to_bytes, Queries};
 use crate::Source;
+use crate::source::source_options::SourceOptions;
 
 type DataMessage = (u16, Queries);
 

@@ -18,7 +18,7 @@ use crate::config::{Config, DatabaseSubsetConfig, DatastoreConfig};
 use crate::datastore::local_disk::LocalDisk;
 use crate::datastore::s3::S3;
 use crate::datastore::Datastore;
-use crate::source::{Source, SourceOptions};
+use crate::source::{Source};
 use crate::tasks::{MaxBytes, TransferredBytes};
 use crate::telemetry::{ClientOptions, TelemetryClient, TELEMETRY_TOKEN};
 use crate::utils::epoch_millis;

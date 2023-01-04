@@ -361,11 +361,11 @@ mod tests {
     use super::{get_row_type, Mysql};
 
     fn get_mysql() -> Mysql<'static> {
-        Mysql::new("127.0.0.1", 3306, "world", "root", "password")
+        Mysql::new("127.0.0.1", 3307, "world", "root", "password")
     }
 
     fn get_invalid_mysql() -> Mysql<'static> {
-        Mysql::new("127.0.0.1", 3306, "world", "root", "wrong_password")
+        Mysql::new("127.0.0.1", 3307, "world", "root", "wrong_password")
     }
 
     #[test]
